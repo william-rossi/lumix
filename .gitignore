@@ -20,6 +20,9 @@
 # production
 /build
 
+# demo store (no MongoDB)
+/.data/
+
 # misc
 .DS_Store
 *.pem
