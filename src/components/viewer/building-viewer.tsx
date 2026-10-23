@@ -32,6 +32,12 @@ const DEFAULT_OVERVIEW = {
   target: { x: 0, y: 12, z: 0 },
 };
 
+interface OverviewCamera {
+  position: { x: number; y: number; z: number };
+  target: { x: number; y: number; z: number };
+  fov?: number;
+}
+
 interface SceneUnit {
   unit: Unit;
   x: number;
@@ -531,39 +537,93 @@ function HoverLabel({
 /* -------------------------------------------------------------------------- */
 
 function CameraRig({
-  overviewPosition,
-  overviewTarget,
+  overview,
   focusPosition,
   focusTarget,
+  fitOverview,
+  frameCenter,
+  frameWidth,
+  frameHeight,
   resetSignal,
   autoRotate,
 }: {
-  overviewPosition: THREE.Vector3Tuple;
-  overviewTarget: THREE.Vector3Tuple;
+  overview: OverviewCamera;
   focusPosition: THREE.Vector3Tuple;
   focusTarget: THREE.Vector3Tuple;
+  fitOverview: boolean;
+  frameCenter: THREE.Vector3Tuple;
+  frameWidth: number;
+  frameHeight: number;
   resetSignal: number;
   autoRotate: boolean;
 }) {
   const controlsRef = useRef<OrbitControlsImpl>(null);
   const { camera, size } = useThree();
-  const goalPosition = useRef(new THREE.Vector3(...overviewPosition));
-  const goalTarget = useRef(new THREE.Vector3(...overviewTarget));
+  const goalPosition = useRef(new THREE.Vector3(...focusPosition));
+  const goalTarget = useRef(new THREE.Vector3(...focusTarget));
   const animating = useRef(true);
 
   const aspect = size.width / Math.max(size.height, 1);
-  const fit = aspect < 0.9 ? 1.65 : aspect < 1.3 ? 1.25 : 1;
+  const focusFit = aspect < 0.9 ? 1.65 : aspect < 1.3 ? 1.25 : 1;
+  const fov = overview.fov ?? 34;
 
   useEffect(() => {
-    const target = new THREE.Vector3(...focusTarget);
-    const rawPosition = new THREE.Vector3(...focusPosition);
-    const position = target
-      .clone()
-      .add(rawPosition.clone().sub(target).multiplyScalar(fit));
-    goalTarget.current.copy(target);
-    goalPosition.current.copy(position);
+    const presetTarget = new THREE.Vector3(
+      overview.target.x,
+      overview.target.y,
+      overview.target.z,
+    );
+    const presetPosition = new THREE.Vector3(
+      overview.position.x,
+      overview.position.y,
+      overview.position.z,
+    );
+
+    if (fitOverview) {
+      // Frame the whole model from its bounds instead of trusting a preset
+      // that may have been authored for a different viewport/aspect ratio.
+      const vFov = THREE.MathUtils.degToRad(fov);
+      const hFov = 2 * Math.atan(Math.tan(vFov / 2) * aspect);
+      const heightDistance = frameHeight / (2 * Math.tan(vFov / 2));
+      const widthDistance = frameWidth / (2 * Math.tan(hFov / 2));
+      const distance = Math.max(heightDistance, widthDistance, 24) * 1.12;
+      const target = new THREE.Vector3(
+        frameCenter[0],
+        frameCenter[1],
+        frameCenter[2],
+      );
+      const direction = presetPosition.clone().sub(presetTarget);
+      if (direction.lengthSq() < 0.0001) direction.set(0.8, 0.7, 1);
+      direction.normalize();
+
+      goalTarget.current.copy(target);
+      goalPosition.current.copy(
+        target.clone().add(direction.multiplyScalar(distance)),
+      );
+    } else {
+      const target = new THREE.Vector3(...focusTarget);
+      const rawPosition = new THREE.Vector3(...focusPosition);
+      const position = target
+        .clone()
+        .add(rawPosition.clone().sub(target).multiplyScalar(focusFit));
+      goalTarget.current.copy(target);
+      goalPosition.current.copy(position);
+    }
+
     animating.current = true;
-  }, [focusPosition, focusTarget, overviewTarget, fit, resetSignal]);
+  }, [
+    overview,
+    focusPosition,
+    focusTarget,
+    fitOverview,
+    frameCenter,
+    frameWidth,
+    frameHeight,
+    focusFit,
+    resetSignal,
+    aspect,
+    fov,
+  ]);
 
   useFrame((_, delta) => {
     const controls = controlsRef.current;
@@ -586,16 +646,18 @@ function CameraRig({
       makeDefault
       enableDamping
       dampingFactor={0.075}
-      enablePan={false}
+      enablePan
+      panSpeed={0.65}
+      rotateSpeed={0.8}
+      zoomSpeed={0.8}
       minDistance={9}
-      maxDistance={120}
+      maxDistance={220}
       maxPolarAngle={Math.PI / 2 - 0.02}
       autoRotate={autoRotate}
       autoRotateSpeed={0.45}
       onStart={() => {
         animating.current = false;
       }}
-      target={overviewTarget}
     />
   );
 }
@@ -878,7 +940,7 @@ export default function BuildingViewer({
     return () => document.removeEventListener("fullscreenchange", onChange);
   }, []);
 
-  const overview = useMemo(
+  const overview = useMemo<OverviewCamera>(
     () => development.model3d.cameraPresets[0] ?? DEFAULT_OVERVIEW,
     [development.model3d.cameraPresets],
   );
@@ -889,6 +951,35 @@ export default function BuildingViewer({
   const selectedMapping = development.model3d.unitsMapping.find(
     (mapping) => mapping.unitId === selectedUnitId,
   );
+
+  const frame = useMemo(() => {
+    const bounds = development.model3d.bounds;
+    const width =
+      Math.max(
+        bounds.max.x - bounds.min.x,
+        bounds.max.z - bounds.min.z,
+        massing.towerWidth,
+        massing.towerDepth,
+      ) + 4;
+    const baseHeight = Math.max(
+      bounds.max.y - bounds.min.y,
+      massing.floors * massing.floorHeight,
+    );
+    const height =
+      baseHeight +
+      Math.max(massing.floors - 1, 0) * explodeValue * EXPLODE_GAP +
+      3.4;
+
+    return {
+      width,
+      height,
+      center: [
+        (bounds.min.x + bounds.max.x) / 2,
+        height / 2,
+        (bounds.min.z + bounds.max.z) / 2,
+      ] as THREE.Vector3Tuple,
+    };
+  }, [development.model3d.bounds, massing, explodeValue]);
 
   const focus = useMemo(() => {
     const baseTarget = new THREE.Vector3(
@@ -1057,10 +1148,13 @@ export default function BuildingViewer({
           />
 
           <CameraRig
-            overviewPosition={[overview.position.x, overview.position.y, overview.position.z]}
-            overviewTarget={[overview.target.x, overview.target.y, overview.target.z]}
+            overview={overview}
             focusPosition={focus.position}
             focusTarget={focus.target}
+            fitOverview={selectedUnit === null && floor === null}
+            frameCenter={frame.center}
+            frameWidth={frame.width}
+            frameHeight={frame.height}
             resetSignal={resetSignal + resetCount}
             autoRotate={isAutoRotating}
           />
